@@ -13,6 +13,8 @@ released.
 
 **Demo video (1:44):** https://youtu.be/aO8HwoBCqDk · also in the repo: [docs/blindspot-demo.mp4](docs/blindspot-demo.mp4)
 
+**Live demo (PayPal sandbox, no real money):** https://blindspot-market.onrender.com · the operator console and the annotator invite code are given to the judges in the Devpost testing notes.
+
 > PayPal **sandbox** only. No real money moves. Annotators in the scripted demo runs are **simulated** and marked as
 > such everywhere. Real people can join on the annotator page.
 
