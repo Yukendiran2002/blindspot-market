@@ -12,9 +12,9 @@ Labels come from the dataset's gold labels (standing in for human annotators). S
 """
 
 import json
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 from datasets import load_dataset
