@@ -9,6 +9,10 @@ exactly those messages from people. It checks their work with hidden test questi
 when more labels stop paying off. The customer is charged only for labels that pass the check, and the unused budget is
 released.
 
+![Customer console after a live sandbox job: money, accuracy per dollar, every round with its PayPal ids, agent feed](docs/console.jpg)
+
+**Demo video:** _(YouTube link added at submission)_
+
 > PayPal **sandbox** only. No real money moves. Annotators in the scripted demo runs are **simulated** and marked as
 > such everywhere. Real people can join on the annotator page.
 
@@ -49,6 +53,8 @@ Mean ± standard deviation over the 5 seeds.
 - Most of the gain over random comes from targeting uncertain messages. Grouping them into confusion areas adds only a
   small gain over plain uncertainty sampling, and not at every budget. Its main value is variety within a round, plus
   an explanation a customer can read: "you are paying to fix Pending ↔ Declined".
+
+<p><img src="docs/annotator.jpg" width="260" alt="Annotator page with a Gemini tip"> <img src="docs/audit.jpg" width="560" alt="Ledger checked against PayPal through the Agent Toolkit"></p>
 
 ## Money safety
 
