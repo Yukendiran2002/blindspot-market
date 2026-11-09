@@ -12,8 +12,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 RUN uv sync --frozen --no-dev
-# Download Banking77 and embed it once at build time (a few minutes on CPU), so the server starts quickly.
-RUN uv run --no-dev python -c "from pathlib import Path; from blindspot.learner import build_cache; build_cache(Path('data'))"
+COPY data ./data
 COPY experiment/results.json ./experiment/results.json
 COPY scripts ./scripts
 COPY --from=web /web/dist ./web/dist

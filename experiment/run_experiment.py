@@ -12,6 +12,7 @@ Labels come from the dataset's gold labels (standing in for human annotators). S
 """
 
 import json
+from pathlib import Path
 import sys
 import time
 
@@ -114,5 +115,5 @@ for s in ("uncertain", "blindspot"):
     print(f"\n{s}: final {curve[-1]:.3f} vs random {rand[-1]:.3f} (+{(curve[-1] - rand[-1]) * 100:.1f} pts). "
           f"Random reaches {target:.3f} at: {reach if reach else 'not within budget'} labels.")
 json.dump({"embed": EMBED, "labels": labels, "price": PRICE, "seeds": SEEDS, "curves": results, "mean": summary},
-          open("results.json", "w"), indent=1)
+          open(Path(__file__).resolve().parent / "results.json", "w"), indent=1)
 print(f"\ntotal time {time.time() - t0:.0f}s")

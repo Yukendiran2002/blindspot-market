@@ -142,8 +142,8 @@ uv sync
 uv run python -c "from blindspot.api import main; main()"
 ```
 
-The first start downloads Banking77 and embeds it on the CPU. This takes a few minutes and is cached in `data/`. Then
-open:
+The precomputed Banking77 embeddings ship in `data/` (20 MB, see `data/README.md`), so nothing is downloaded and no
+embedding model is loaded: the server needs about 250 MB of memory. Then open:
 
 - the console: http://127.0.0.1:8077 (needs the operator key)
 - the annotator page: http://127.0.0.1:8077/label (on a phone or in a second window)
@@ -171,7 +171,9 @@ Other commands:
 
 - `uv run pytest`: run the tests
 - `uv run python scripts/live_job.py /tmp/live.db 3`: run a whole job against the sandbox from the command line
-- `uv run python experiment/run_experiment.py`: rerun the benchmark
+- `cd experiment && uv run python run_experiment.py`: rerun the benchmark (its own environment; downloads the
+  dataset and the embedding model)
+- `uv sync --extra build`: install the libraries needed to rebuild `data/` from Banking77
 
 ## Limits
 
@@ -184,5 +186,5 @@ Other commands:
 
 ## Licence and credits
 
-Apache-2.0 (see `LICENSE`). Banking77 by PolyAI (CC-BY-4.0). PayPal Agent Toolkit by PayPal (Apache-2.0). AG Grid
+Apache-2.0 (see `LICENSE`). Banking77 by PolyAI (CC-BY-4.0); the embeddings in `data/` are derived from it. PayPal Agent Toolkit by PayPal (Apache-2.0). AG Grid
 Community (MIT). Built by Liceron for the PayPal AI Hackathon 2026.

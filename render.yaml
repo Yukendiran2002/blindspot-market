@@ -3,7 +3,7 @@ services:
   - type: web
     name: blindspot-market
     runtime: docker
-    plan: standard   # 2 GB RAM: the sentence-embedding model and scikit-learn run in-process
+    plan: starter   # ~250 MB resident: embeddings are precomputed in data/, no model is loaded at runtime
     healthCheckPath: /api/health
     disk:
       name: data

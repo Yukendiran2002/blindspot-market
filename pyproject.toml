@@ -11,11 +11,16 @@ dependencies = [
     "uvicorn>=0.32",
     "numpy>=1.26",
     "scikit-learn>=1.5",
+    "nexura-agents==0.9.3",
+    "paypal-agent-toolkit==1.11.0",
+]
+
+[project.optional-dependencies]
+# Only to rebuild data/ from Banking77 (download + embed). The server uses the committed data/ files.
+build = [
     "sentence-transformers>=3",
     "datasets>=3",
     "torch>=2.4",
-    "nexura-agents==0.9.3",
-    "paypal-agent-toolkit==1.11.0",
 ]
 
 [dependency-groups]

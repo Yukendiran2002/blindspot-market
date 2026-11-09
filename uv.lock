@@ -2,9 +2,9 @@ version = 1
 revision = 3
 requires-python = ">=3.12, <3.14"
 resolution-markers = [
+    "python_full_version >= '3.13' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "sys_platform == 'win32'",
     "sys_platform == 'emscripten'",
-    "python_full_version >= '3.13' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "sys_platform == 'darwin'",
 ]
@@ -236,17 +236,21 @@ name = "blindspot"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "datasets" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "nexura-agents" },
     { name = "numpy" },
     { name = "paypal-agent-toolkit" },
     { name = "scikit-learn" },
+    { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+build = [
+    { name = "datasets" },
     { name = "sentence-transformers" },
     { name = "torch", version = "2.15.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.15.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
-    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -258,17 +262,18 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "datasets", specifier = ">=3" },
+    { name = "datasets", marker = "extra == 'build'", specifier = ">=3" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "nexura-agents", specifier = "==0.9.3" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "paypal-agent-toolkit", specifier = "==1.11.0" },
     { name = "scikit-learn", specifier = ">=1.5" },
-    { name = "sentence-transformers", specifier = ">=3" },
-    { name = "torch", specifier = ">=2.4", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "sentence-transformers", marker = "extra == 'build'", specifier = ">=3" },
+    { name = "torch", marker = "extra == 'build'", specifier = ">=2.4", index = "https://download.pytorch.org/whl/cpu" },
     { name = "uvicorn", specifier = ">=0.32" },
 ]
+provides-extras = ["build"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2866,9 +2871,9 @@ name = "torch"
 version = "2.15.0+cpu"
 source = { registry = "https://download.pytorch.org/whl/cpu" }
 resolution-markers = [
+    "python_full_version >= '3.13' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "sys_platform == 'win32'",
     "sys_platform == 'emscripten'",
-    "python_full_version >= '3.13' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [

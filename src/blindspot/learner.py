@@ -82,7 +82,11 @@ def build_cache(cache: Path) -> None:
 
 def load_corpus(cache: Path) -> Corpus:
     if not (cache / "meta.json").exists():
-        build_cache(cache)
+        raise SystemExit(
+            f"no dataset cache in {cache}. It is committed in the repository (data/); to rebuild it from Banking77: "
+            "uv sync --extra build && uv run python -c \"from pathlib import Path; "
+            "from blindspot.learner import build_cache; build_cache(Path('data'))\""
+        )
     meta = json.loads((cache / "meta.json").read_text())
     return Corpus(
         texts=json.loads((cache / "pool_texts.json").read_text()),
