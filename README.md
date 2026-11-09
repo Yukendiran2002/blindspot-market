@@ -11,7 +11,7 @@ released.
 
 ![Customer console after a live sandbox job: money, accuracy per dollar, every round with its PayPal ids, agent feed](docs/console.jpg)
 
-**Demo video (1:44):** [docs/blindspot-demo.mp4](docs/blindspot-demo.mp4) · YouTube link added at submission
+**Demo video (1:44):** https://youtu.be/aO8HwoBCqDk · also in the repo: [docs/blindspot-demo.mp4](docs/blindspot-demo.mp4)
 
 > PayPal **sandbox** only. No real money moves. Annotators in the scripted demo runs are **simulated** and marked as
 > such everywhere. Real people can join on the annotator page.
