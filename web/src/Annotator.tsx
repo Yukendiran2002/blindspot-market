@@ -69,6 +69,16 @@ function TaskCard({ task, onAnswer, busy }: { task: Task; onAnswer: (intent: num
     <div className="card space-y-4 p-5">
       <div className="label">What does this customer want?</div>
       <blockquote className="rounded-lg border border-line bg-ink p-4 text-lg leading-snug">“{task.text}”</blockquote>
+      {task.tips.length > 0 && (
+        <div className="space-y-1 rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 text-xs leading-relaxed text-sky-100">
+          <div className="font-semibold text-sky-300">Tip from the agent</div>
+          {task.tips.map((t, i) => (
+            <div key={i}>
+              <b>{t.a}</b> vs <b>{t.b}</b>: {t.tip}
+            </div>
+          ))}
+        </div>
+      )}
       <div className="space-y-2">
         {task.options.map((o) => (
           <button key={o.id} disabled={busy} className="btn-ghost w-full justify-start py-3 text-left text-[15px]" onClick={() => onAnswer(o.id)}>

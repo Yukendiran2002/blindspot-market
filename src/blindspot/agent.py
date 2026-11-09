@@ -127,3 +127,50 @@ async def llm_explanation(
     result = await Runner().run_async(agent, "Facts (JSON):\n" + json.dumps(facts), timeout=40)
     text = str(result.final_output or "").strip()
     return text if result.status == "completed" and text else template_explanation(d, confusions)
+
+
+GUIDE_INSTRUCTIONS = """You write labelling tips for people sorting customer-support messages of a bank into intents.
+For each pair of intents the model confuses, write ONE short, concrete tip (max 25 words) on how to tell them apart,
+based on what the customer is asking for. Plain English. No examples copied from real customers. Do not invent
+policies; describe the difference between the intents only."""
+
+
+async def llm_guidance(
+    api_key: str, confusions: list[dict[str, Any]], model: str = "gemini-3.8-flash"
+) -> list[dict[str, str]]:
+    """Gemini writes one tip per confused pair, shown to annotators during the round. Empty list on any failure."""
+    from nexura_agents import Agent, Runner
+    from nexura_agents.providers.gemini import GeminiNativeProvider
+    from pydantic import BaseModel
+
+    class Tip(BaseModel):
+        a: str
+        b: str
+        tip: str
+
+    class Guide(BaseModel):
+        tips: list[Tip]
+
+    pairs = [{"a": c["a"], "b": c["b"]} for c in confusions[:4]]
+    if not pairs:
+        return []
+    agent = Agent(
+        name="blindspot-guide",
+        instructions=GUIDE_INSTRUCTIONS,
+        model=GeminiNativeProvider(model, api_key=api_key, timeout=30.0),
+        output_type=Guide,
+        max_turns=2,
+    )
+    res = await Runner().run_async(agent, "Confused intent pairs (JSON): " + json.dumps(pairs), timeout=45)
+    if res.status != "completed":
+        return []
+    out = res.final_output
+    guide = (
+        out
+        if isinstance(out, Guide)
+        else Guide.model_validate_json(out)
+        if isinstance(out, str)
+        else Guide.model_validate(out)
+    )
+    known = {(p["a"], p["b"]) for p in pairs}
+    return [t.model_dump() for t in guide.tips if (t.a, t.b) in known and t.tip.strip()][:4]

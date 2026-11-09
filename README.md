@@ -86,6 +86,7 @@ Every money path was also run against the real sandbox.
 |---|---|
 | Finding blind spots | Sentence embeddings (`sentence-transformers/all-MiniLM-L6-v2`) and logistic regression. The agent ranks messages by how unsure the model is, then uses k-means to group the most uncertain ones |
 | Explaining purchases | Gemini (`gemini-3.8-flash`) through the [Nexura Agents SDK](https://pypi.org/project/nexura-agents/), no tools. Falls back to a template |
+| Helping annotators | Each round, Gemini writes one tip per confused pair ("Use Pending when the payment is still processing, Declined when it was refused"), shown with the matching tasks |
 | Answering money questions | Gemini through Nexura, with two read-only tools: the PayPal Agent Toolkit's `get_order_details` for the job's order, and Blindspot's ledger |
 | Checking the books | The PayPal Agent Toolkit (`paypal-agent-toolkit`, framework-neutral core) reads PayPal's records. Code compares them with the ledger |
 
@@ -126,6 +127,9 @@ To create a simulated annotator (for scripted runs only):
 curl -X POST localhost:8077/api/annotators/simulated -H "X-Operator-Key: $KEY" -H 'content-type: application/json' \
   -d '{"name":"Spam bot (simulated)","paypal_email":"spam@example.com","accuracy":0.1}'
 ```
+
+Deploy: `Dockerfile` (one container: API + web, dataset embedded at build time) and `render.yaml`. Set the secrets in
+the host's dashboard.
 
 Other commands:
 

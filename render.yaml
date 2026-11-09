@@ -1,0 +1,22 @@
+# Render blueprint (not deployed yet). Secrets are set in the Render dashboard, never here.
+services:
+  - type: web
+    name: blindspot-market
+    runtime: docker
+    plan: standard   # 2 GB RAM: the sentence-embedding model and scikit-learn run in-process
+    healthCheckPath: /api/health
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: BLINDSPOT_OPERATOR_KEY
+        generateValue: true
+      - key: BLINDSPOT_INVITE
+        sync: false

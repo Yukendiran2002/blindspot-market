@@ -318,6 +318,12 @@ class Blindspot:
                 d.explanation = await agent_mod.llm_explanation(self.gemini_key, d, confusions)
             except Exception as exc:  # noqa: BLE001 - the template explanation stands
                 self.db.event("explanation_fallback", job_id, error=type(exc).__name__)
+        guide: list[dict[str, str]] = []
+        if self.gemini_key and confusions:
+            try:
+                guide = await agent_mod.llm_guidance(self.gemini_key, confusions)
+            except Exception:  # noqa: BLE001 - tips are optional help for annotators
+                guide = []
         rid = new_id("rnd")
         now = self.clock()
         preds = m.predict(np.array([p["pool_index"] for p in d.picks]), top=OPTIONS)
@@ -335,7 +341,7 @@ class Blindspot:
                     job_id,
                     number,
                     "LABELLING",
-                    json.dumps({**json.loads(d.to_json()), "confusions": confusions}),
+                    json.dumps({**json.loads(d.to_json()), "confusions": confusions, "guide": guide}),
                     val,
                     m.accuracy("sealed"),
                     now,
@@ -401,8 +407,12 @@ class Blindspot:
         if t is None:
             return None
         opts = json.loads(t["options"])
+        plan = json.loads(self.db.one("SELECT plan FROM rounds WHERE id=?", t["round_id"])["plan"])
+        labels = {pretty(self.c.intents[o]) for o in opts}
+        tips = [g for g in plan.get("guide", []) if g["a"] in labels or g["b"] in labels]
         return {
             "task_id": t["id"],
+            "tips": tips[:2],
             "text": self.c.texts[t["pool_index"]],
             "options": [{"id": o, "label": pretty(self.c.intents[o])} for o in opts],
             "all_intents": [{"id": i, "label": pretty(n)} for i, n in enumerate(self.c.intents)],
@@ -595,6 +605,7 @@ class Blindspot:
                     "labels_planned": plan.get("n"),
                     "explanation": plan.get("explanation"),
                     "confusions": plan.get("confusions", []),
+                    "guide": plan.get("guide", []),
                     "val_before": r["val_before"],
                     "val_after": r["val_after"],
                     "sealed_after": r["sealed_after"],

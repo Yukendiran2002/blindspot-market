@@ -90,6 +90,7 @@ export type Audit = {
 export type Me = { id: string; name: string; kind: string; banned: boolean; open: number; answered: number; accepted: number; earned: string }
 export type Task = {
   task_id: string
+  tips: { a: string; b: string; tip: string }[]
   text: string
   options: { id: number; label: string }[]
   all_intents: { id: number; label: string }[]

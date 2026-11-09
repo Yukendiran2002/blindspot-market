@@ -1,0 +1,9 @@
+.venv
+web/node_modules
+web/dist
+data
+*.db
+*.db-*
+.env
+__pycache__
+experiment/.venv
