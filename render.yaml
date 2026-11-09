@@ -16,6 +16,8 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
+      - key: GEMINI_DAILY_LIMIT
+        value: "300"
       - key: BLINDSPOT_OPERATOR_KEY
         generateValue: true
       - key: BLINDSPOT_INVITE

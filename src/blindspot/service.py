@@ -54,7 +54,18 @@ class Blindspot:
         self.db, self.paypal, self.c, self.clock = db, paypal, corpus, clock
         self.settle = Settlement(db, paypal, clock)
         self.gemini_key = gemini_key
+        self.gemini_daily_limit = 300  # model calls per UTC day; past it, template explanations and no tips
+        self._gemini_day, self._gemini_used = "", 0
         self._models: dict[str, Model] = {}
+
+    def gemini_allowed(self) -> bool:
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        if day != self._gemini_day:
+            self._gemini_day, self._gemini_used = day, 0
+        if not self.gemini_key or self._gemini_used >= self.gemini_daily_limit:
+            return False
+        self._gemini_used += 1
+        return True
 
     # --- annotators ---------------------------------------------------------------------------
     def add_annotator(
@@ -328,15 +339,15 @@ class Blindspot:
             d.picks = m.blind_spots(available, d.n, seed=number)
             confusions = agent_mod.summarize_picks(d.picks, self.c.intents)
         d.explanation = agent_mod.template_explanation(d, confusions)
-        if self.gemini_key:
+        if self.gemini_allowed():
             try:
-                d.explanation = await agent_mod.llm_explanation(self.gemini_key, d, confusions)
+                d.explanation = await agent_mod.llm_explanation(self.gemini_key or "", d, confusions)
             except Exception as exc:  # noqa: BLE001 - the template explanation stands
                 self.db.event("explanation_fallback", job_id, error=type(exc).__name__)
         guide: list[dict[str, str]] = []
-        if self.gemini_key and confusions:
+        if confusions and self.gemini_allowed():
             try:
-                guide = await agent_mod.llm_guidance(self.gemini_key, confusions)
+                guide = await agent_mod.llm_guidance(self.gemini_key or "", confusions)
             except Exception:  # noqa: BLE001 - tips are optional help for annotators
                 guide = []
         rid = new_id("rnd")

@@ -393,10 +393,10 @@ def create_app(
     async def ask(job_id: str, body: AskIn) -> dict[str, Any]:
         """Gemini answers questions about this job's money with read-only tools (PayPal Agent Toolkit + ledger)."""
         job_or_404(job_id)
-        if records is None or not service.gemini_key:
+        if records is None or not service.gemini_allowed():
             raise HTTPException(503, "money questions need the toolkit reader and a Gemini key")
         try:
-            return await ask_about_money(service.db, records, job_id, body.question, api_key=service.gemini_key)
+            return await ask_about_money(service.db, records, job_id, body.question, api_key=service.gemini_key or "")
         except Exception as exc:  # noqa: BLE001 - shown to the operator, never moves money
             raise HTTPException(502, f"could not answer: {type(exc).__name__}") from None
 
@@ -445,6 +445,7 @@ def main() -> None:  # pragma: no cover - process entry point
         load_corpus(Path(env.get("BLINDSPOT_DATA", "data"))),
         gemini_key=gemini,
     )
+    service.gemini_daily_limit = int(env.get("GEMINI_DAILY_LIMIT", "300"))
     operator_key = env.get("BLINDSPOT_OPERATOR_KEY")
     if not operator_key and env.get("BLINDSPOT_OPEN_CONSOLE") != "1":
         raise SystemExit("set BLINDSPOT_OPERATOR_KEY (or BLINDSPOT_OPEN_CONSOLE=1 for local development)")
