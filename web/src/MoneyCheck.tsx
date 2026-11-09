@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { console_, plain, type Audit } from './api'
 
-const SUGGESTED = ['Why was I refunded?', 'How much did PayPal charge me, and when?', 'Who was paid for my labels?']
+const SUGGESTED = ['Why was I refunded?', 'How much did PayPal charge me, and when?', 'Have the annotators received their pay?']
 
 /** Second pair of eyes: PayPal's own records, read through the PayPal Agent Toolkit, against Blindspot's ledger. */
 export function MoneyCheck({ jobId, funded }: { jobId: string; funded: boolean }) {
@@ -54,7 +54,7 @@ export function MoneyCheck({ jobId, funded }: { jobId: string; funded: boolean }
       {audit && (
         <div className="mt-3 overflow-hidden rounded-lg border border-line">
           <div className={`px-3 py-2 text-sm font-medium ${audit.ok ? 'bg-green-500/10 text-green-300' : 'bg-red-500/10 text-red-300'}`}>
-            {audit.ok ? `Every amount matches PayPal (${audit.checks.length} checks)` : 'PayPal and the ledger disagree — see the red lines'}
+            {audit.ok ? `All ${audit.checks.length} checks match PayPal's records` : 'PayPal and the ledger disagree — see the red lines'}
             <span className="mono ml-2 text-[10px] text-mute">order {audit.order_id}</span>
           </div>
           <table className="w-full text-xs">

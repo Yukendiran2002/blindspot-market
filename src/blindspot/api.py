@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -126,9 +126,20 @@ class Autopilot:
                     waited += 1.0
                 async with self.locks.setdefault(job_id, asyncio.Lock()):
                     app.expire_open_tasks(round_id)
-                    await app.settle_round(round_id)
-                    if app._job(job_id)["status"] != "ACTIVE":
-                        break
+                    res = await app.settle_round(round_id)
+                # a charge PayPal has not confirmed yet: wait for it (bounded), never start another purchase meanwhile
+                tries = 0
+                while res.get("pending") and tries < 30:
+                    await asyncio.sleep(2.0)
+                    tries += 1
+                    async with self.locks.setdefault(job_id, asyncio.Lock()):
+                        await app.settle.reconcile(job_id)
+                        res = await app.finalize_round(round_id)
+                if res.get("pending"):
+                    app.db.event("autopilot_waiting", job_id, detail="PayPal has not confirmed a charge; paused")
+                    return
+                if app._job(job_id)["status"] != "ACTIVE":
+                    break
             if opts.close_when_done:
                 async with self.locks.setdefault(job_id, asyncio.Lock()):
                     await app.close_job(job_id)
@@ -156,17 +167,17 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        await service.settle.reconcile()  # finish anything a previous process left uncertain
+        await service.resume()  # finish money calls and rounds a previous process left open
         yield
         for job_id in list(pilot.tasks):
             await pilot.stop(job_id)
 
     api = FastAPI(title="Blindspot Market", version="0.1.0", lifespan=lifespan)
 
-    def operator(x_operator_key: str = Header(default=""), key: str = Query(default="")) -> None:
+    def operator(x_operator_key: str = Header(default="")) -> None:
         if operator_key is None:
             return
-        given = x_operator_key or key
+        given = x_operator_key  # header only: keys never appear in URLs or access logs
         if not given or not hmac.compare_digest(given.encode(), operator_key.encode()):
             raise HTTPException(401, "operator key required")
 
@@ -371,7 +382,8 @@ def create_app(
         if records is None:
             raise HTTPException(503, "PayPal Agent Toolkit reader not configured")
         try:
-            return await audit_job(service.db, records, job_id)
+            await service.settle.reconcile(job_id)
+            return await audit_job(service.db, records, job_id, paypal=service.paypal)
         except (RuntimeError, TimeoutError) as exc:
             raise HTTPException(409, str(exc) or "PayPal did not answer in time") from None
         except Exception as exc:  # noqa: BLE001 - the toolkit raises requests errors

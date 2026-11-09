@@ -110,7 +110,7 @@ def test_a_person_labels_on_the_annotator_page_and_is_paid(client, env):
     j = wait_for(client, jid, lambda j: j["job"]["status"] == "CLOSED")
     assert answered >= 20
     s = j["rounds"][0]["settlement"]
-    assert s["accepted"] == 20 and s["capture_state"] == "DONE" and s["payout_state"] == "SUBMITTED"
+    assert s["accepted"] == 20 and s["capture_state"] == "DONE" and s["payout_state"] == "DONE"
     assert env.fake.paid_to("priya@x.test") > 0
     assert client.get("/api/me", headers=h).json()["accepted"] >= 20
 

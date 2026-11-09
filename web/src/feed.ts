@@ -41,7 +41,7 @@ export function describe(e: JobEvent): FeedLine | null {
     case 'charge_refused':
       return { ...base, tone: 'bad', title: 'PayPal refused the charge — nobody is paid and those labels are not used', body: `${s(d.name)} ${s(d.issues)}` }
     case 'payout_submitted':
-      return { ...base, tone: 'money', title: `Paid annotators $${s(d.amount)} with PayPal Payouts`, ids: [`batch ${s(d.payout_batch_id)}`] }
+      return { ...base, tone: 'money', title: `Sent $${s(d.amount)} to annotators with PayPal Payouts`, body: 'Each person counts as paid once PayPal reports their item SUCCESS.', ids: [`batch ${s(d.payout_batch_id)}`] }
     case 'payout_already_submitted':
       return { ...base, tone: 'good', title: 'Payout confirmed by PayPal duplicate check — nobody paid twice' }
     case 'payout_refused':
@@ -50,10 +50,21 @@ export function describe(e: JobEvent): FeedLine | null {
       return { ...base, tone: 'bad', title: 'PayPal refused the refund', body: `${s(d.name)} ${s(d.issues)}` }
     case 'payout_uncertain':
       return { ...base, tone: 'warn', title: 'Payout response lost — will check before resending the same batch id' }
+    case 'charge_pending':
+      return { ...base, tone: 'warn', title: `PayPal is still processing the $${s(d.amount)} charge`, body: 'Nobody is paid and no label trains the model until it completes.' }
+    case 'charge_needs_review':
+    case 'payout_needs_review':
+      return { ...base, tone: 'bad', title: 'A payment needs a person to check it in PayPal', body: 'Nothing more is sent automatically for it.' }
+    case 'refund_pending':
+      return { ...base, tone: 'warn', title: 'Refund accepted by PayPal, still processing' }
+    case 'autopilot_waiting':
+      return { ...base, tone: 'warn', title: 'Agent paused: waiting for PayPal to confirm a charge' }
+    case 'void_refused':
+      return { ...base, tone: 'bad', title: `The hold was not released (PayPal shows ${s(d.hold)})` }
     case 'payout_checked':
       return { ...base, tone: d.state === 'DONE' ? 'good' : 'warn', title: `Payout status: ${s(d.state)}`, body: `batch ${s(d.batch_status)}` }
     case 'annotator_revoked':
-      return { ...base, tone: 'bad', title: `Annotator banned: ${s(d.reason)}`, body: `${s(d.labels)} earlier labels removed from training; the customer is refunded for them.` }
+      return { ...base, tone: 'bad', title: `Annotator removed after failing quality checks: ${s(d.reason)}`, body: `${s(d.labels)} earlier labels removed from training; the customer is refunded for them.` }
     case 'refunded':
       return { ...base, tone: 'money', title: `Refunded $${s(d.amount)} to the customer for revoked labels`, ids: [`refund ${s(d.refund_id)}`] }
     case 'model_measured':

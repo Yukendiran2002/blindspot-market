@@ -49,10 +49,15 @@ Source: [`experiment/run_experiment.py`](experiment/run_experiment.py). Results:
 
 Mean ± standard deviation over the 5 seeds.
 
-- Random buying needs about **$450** to reach the accuracy Blindspot reaches at **$250**: about 45% less spend.
+- On this benchmark, random buying needs about **$450** to reach the accuracy Blindspot reaches at **$250**.
 - Most of the gain over random comes from targeting uncertain messages. Grouping them into confusion areas adds only a
-  small gain over plain uncertainty sampling, and not at every budget. Its main value is variety within a round, plus
-  an explanation a customer can read: "you are paying to fix Pending ↔ Declined".
+  small gain over plain uncertainty sampling, and not at every budget. At $600 the gain over uncertainty-only is
+  0.3 points, within the run-to-run spread. Its main value is variety within a round, plus an explanation a customer
+  can read: "you are paying to fix Pending ↔ Declined".
+- What the benchmark does not measure:
+  - Labels come from the dataset's answers, so there are no human mistakes, test-question labour, rejected work or fees.
+  - It buys 12 rounds of 100 from the full training pool. The app holds back 1,000 messages as the customer's
+    validation set and stops by rule.
 
 <p><img src="docs/annotator.jpg" width="260" alt="Annotator page with a Gemini tip"> <img src="docs/audit.jpg" width="560" alt="Ledger checked against PayPal through the Agent Toolkit"></p>
 
@@ -61,28 +66,53 @@ Mean ± standard deviation over the 5 seeds.
 The agent never moves money itself. The language model writes explanations and answers questions. Deterministic code
 moves money, and every step is recorded before it is sent.
 
-- **Charge once.** A capture's `PayPal-Request-Id` and `custom_id` are the settlement id. If a response is lost, the
-  order is read back and the capture is found by its `custom_id` before anything is resent. A resend reuses the same id.
-- **Pay once, and only after the charge.** Payouts use `sender_batch_id` = settlement id, and PayPal refuses a
-  duplicate batch. No payout is sent while a capture is uncertain or refused.
-- **Pay only for checked work.** Hidden test questions (the customer's own labelled examples) gate every annotator.
-  Labels from a refused charge never train the model.
+- **Charge once.** A capture's `PayPal-Request-Id` and `custom_id` are the settlement id. After a crash or a lost
+  response, the server first reads the order back and looks for the capture by `custom_id`. It resends with the same id
+  only when that read succeeds and shows no capture, and only within 24 hours. After that, the charge goes to a person
+  for review. If PayPal cannot be read, nothing is sent.
+- **Pending means not yet paid.** A capture that PayPal reports as PENDING keeps the round open:
+  - no annotator is paid
+  - its labels do not train the model
+  - no new purchase starts and the job cannot close
+  - it settles once PayPal reports COMPLETED; if PayPal declines it, the reserved budget is released
+- **Pay once, and only after the charge completes.** Payouts use `sender_batch_id` = settlement id, and PayPal refuses
+  a duplicate batch. If our first attempt's response was lost, PayPal's refusal links to the original batch, which is
+  then tracked.
+- **"Received" means every person got it.** Each annotator's payout item is tracked:
+  - a person is shown as paid only when their item is SUCCESS
+  - unclaimed or pending items stay visible
+  - a returned, failed or blocked item marks the payout ITEM_FAILED
+- **Pay only for checked work.** Hidden test questions (the customer's own labelled examples) gate every annotator. An
+  annotator needs at least two answered test questions and enough of them right. With fewer, their work is neither
+  charged nor paid. Labels from a refused charge never train the model.
+- **Refunds count when completed.** A refund PayPal reports as PENDING is shown as pending until it completes.
 - **Never exceed the hold.** Planning caps each round by the money left, and settlement checks the limit again before
   charging.
-- **"Paid" means received.** A payout counts as done only when every item in it shows SUCCESS. Unclaimed or pending
-  items stay visible.
-- **Hold window.** PayPal honours an authorization for 3 days
-  ([docs](https://developer.paypal.com/payment-methods/auth-honor/)). The agent stops buying on an older hold.
+- **Hold window.** PayPal honours an authorization best in its first 3 days
+  ([docs](https://developer.paypal.com/payment-methods/auth-honor/)). The agent buys only in the first 48 hours, which
+  leaves a day to settle. A job can be funded only once.
+- **Closing is checked.** The unused budget counts as released only when PayPal shows the authorization VOIDED. A
+  refused void is reported as such.
 - **Sandbox only.** The REST client and the toolkit reader refuse any host other than `api-m.sandbox.paypal.com`.
-- **Restart-safe.** On start, the server reconciles anything left uncertain.
+- **Restart-safe.** On start, the server finishes any money call and any round a previous process left open.
 
-The 29 tests in `tests/` run against a local fake PayPal (`tests/fake_paypal.py`), which copies the behaviour we saw in
+The 42 tests in `tests/` run against a local fake PayPal (`tests/fake_paypal.py`), which copies the behaviour we saw in
 the sandbox. They cover:
 
 - lost responses, server errors and captures that are slow to appear
 - a capture PayPal no longer matches to our request id
-- refused charges, cheaters and budget limits
+- a crash after a request was sent, and an unreadable order
+- pending captures and refunds, declined captures, and failed payout items
+- duplicate payout recovery
+- a round left half-settled, refused voids, and double funding
+- too few test answers, refused charges, cheaters and budget limits
 - annotator tokens, task expiry and the audit
+
+A separate mutation check reverts each of these fixes one at a time; the tests catch every one.
+
+**Costs we do not hide.** Annotators are also paid for correct test answers, which the customer is not charged for.
+With few labels per annotator, a round can cost Liceron more than it collects. Payouts are funded from Liceron's
+PayPal balance, and PayPal fees are not modelled.
 
 Every money path was also run against the real sandbox.
 

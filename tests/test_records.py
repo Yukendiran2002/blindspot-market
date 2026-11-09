@@ -63,3 +63,13 @@ def test_toolkit_reader_is_sandbox_and_read_only():
     for method in ("pay_order", "create_order", "create_refund", "accept_dispute_claim", "cancel_subscription"):
         with pytest.raises(PermissionError):
             run(r.run(method, {}))
+
+
+def test_audit_checks_annotator_payouts_with_the_payouts_api(tmp_path):
+    env = Env(tmp_path)
+    anns = env.annotators(GOOD)
+    jid = env.job()
+    one_round(env, jid, anns)
+    res = run(audit_job(env.app.db, FakeReader(env), jid, paypal=env.app.paypal))
+    payout_checks = [c for c in res["checks"] if c["check"].startswith("Payout batch")]
+    assert res["ok"] and len(payout_checks) == 1 and "SUCCESS" in payout_checks[0]["paypal"]

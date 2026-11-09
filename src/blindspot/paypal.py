@@ -25,9 +25,18 @@ SANDBOX = "https://api-m.sandbox.paypal.com"
 
 
 class PayPalError(Exception):
-    def __init__(self, status: int | None, name: str, message: str, issues: list[str], debug_id: str | None):
+    def __init__(
+        self,
+        status: int | None,
+        name: str,
+        message: str,
+        issues: list[str],
+        debug_id: str | None,
+        links: list[str] | None = None,
+    ):
         super().__init__(f"{status} {name}: {message} {issues}".strip())
         self.status, self.name, self.issues, self.debug_id = status, name, issues, debug_id
+        self.links = links or []  # hrefs PayPal attached to the error (e.g. the original payout batch)
 
 
 class PayPalDefinite(PayPalError):
@@ -116,9 +125,16 @@ class PayPal:
                 raise PayPalUncertain(r.status_code, "UNREADABLE_RESPONSE", "success status, unreadable body", [], None)
             return body
         name = str(body.get("name") or "HTTP_ERROR")
-        issues = [str(d.get("issue")) for d in body.get("details", []) if isinstance(d, dict) and d.get("issue")]
+        details = [d for d in body.get("details", []) if isinstance(d, dict)]
+        issues = [str(d.get("issue")) for d in details if d.get("issue")]
+        links = [
+            str(link.get("href"))
+            for d in details
+            for link in (d.get("link") or d.get("links") or [])
+            if isinstance(link, dict) and link.get("href")
+        ]
         cls = PayPalUncertain if r.status_code >= 500 or r.status_code in (409, 429) else PayPalDefinite
-        raise cls(r.status_code, name, str(body.get("message") or ""), issues, body.get("debug_id"))
+        raise cls(r.status_code, name, str(body.get("message") or ""), issues, body.get("debug_id"), links)
 
     # --- budget hold --------------------------------------------------------------------------
     async def create_budget_order(
@@ -231,7 +247,23 @@ class PayPal:
         )
 
     async def get_payout(self, payout_batch_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/v1/payments/payouts/{_safe(payout_batch_id)}", prefer_full=False)
+        """The batch with ALL its items (follows pagination; a batch can hold more items than one page)."""
+        first = await self._request(
+            "GET",
+            f"/v1/payments/payouts/{_safe(payout_batch_id)}?page=1&page_size=1000&total_required=true",
+            prefer_full=False,
+        )
+        items = list(first.get("items") or [])
+        pages = int(first.get("total_page") or 1)
+        for page in range(2, min(pages, 50) + 1):
+            more = await self._request(
+                "GET", f"/v1/payments/payouts/{_safe(payout_batch_id)}?page={page}&page_size=1000", prefer_full=False
+            )
+            items.extend(more.get("items") or [])
+        return {**first, "items": items}
+
+    async def get_refund(self, refund_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/v2/payments/refunds/{_safe(refund_id)}")
 
 
 def authorizations_of(order: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -240,3 +272,19 @@ def authorizations_of(order: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def captures_of(order: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [c for u in order.get("purchase_units", []) for c in (u.get("payments", {}).get("captures") or [])]
+
+
+def payout_batch_from_links(links: Sequence[str]) -> str | None:
+    """The original payout batch id from a duplicate-sender_batch_id error (sandbox hosts only)."""
+    for href in links:
+        url = httpx.URL(href)
+        parts = url.path.strip("/").split("/")
+        if (
+            url.scheme == "https"
+            and url.host in ("api.sandbox.paypal.com", "api-m.sandbox.paypal.com")
+            and parts[:3] == ["v1", "payments", "payouts"]
+            and len(parts) == 4
+            and parts[3].isalnum()
+        ):
+            return parts[3]
+    return None

@@ -43,7 +43,8 @@ class FakePayPal:
         self.faults: dict[str, list[str]] = {}  # endpoint kind -> queue of faults
         self.calls: list[str] = []
         self.hide_captures = 0  # next N order views omit captures (delayed visibility)
-        self.item_status: dict[str, str] = {}  # receiver email -> payout item status (default SUCCESS)
+        self.item_status: dict[str, str] = {}
+        self.refund_status = "COMPLETED"  # status of the next refunds (PENDING to test pending refunds)  # receiver email -> payout item status (default SUCCESS)
         self.transport = httpx.MockTransport(self._handle)
 
     def fault(self, kind: str, *faults: str) -> None:
@@ -64,11 +65,24 @@ class FakePayPal:
         if m == "POST" and path == "/v2/checkout/orders":
             return self._create_order(body)
         if m == "GET" and p[:3] == ["v2", "checkout", "orders"]:
+            if self._take("order") == "500":
+                return httpx.Response(500, json={"name": "INTERNAL_SERVER_ERROR"})
             return httpx.Response(200, json=self._order_view(p[3]))
+        if m == "GET" and p[:3] == ["v2", "payments", "authorizations"] and len(p) == 4:
+            a = self.auths[p[3]]
+            return httpx.Response(200, json={k: v for k, v in a.items() if k not in ("captured", "order")})
+        if m == "GET" and p[:3] == ["v2", "payments", "captures"] and len(p) == 4:
+            c = self.captures[p[3]]
+            return httpx.Response(200, json={k: v for k, v in c.items() if not k.startswith("_")})
+        if m == "GET" and p[:3] == ["v2", "payments", "refunds"] and len(p) == 4:
+            r = self.refunds[p[3]]
+            return httpx.Response(200, json={k: v for k, v in r.items() if not k.startswith("_")})
         if p[:3] == ["v2", "payments", "authorizations"] and p[-1] == "capture":
             return self._capture(p[3], body, rid)
         if p[:3] == ["v2", "payments", "authorizations"] and p[-1] == "void":
             a = self.auths[p[3]]
+            if self._take("void") == "422":
+                return httpx.Response(422, json={"name": "UNPROCESSABLE_ENTITY", "details": [{"issue": "CANNOT_VOID"}]})
             if a["status"] in ("VOIDED", "CAPTURED"):
                 return httpx.Response(
                     422,
@@ -145,16 +159,17 @@ class FakePayPal:
                 422, json={"name": "UNPROCESSABLE_ENTITY", "details": [{"issue": "PAYER_CANNOT_PAY"}]}
             )
         a = self.auths[aid]
+        pending = f == "pending"
         cents = _c(body["amount"]["value"])
         if a["status"] == "VOIDED" or a["captured"] + cents > _c(a["amount"]["value"]):
             return httpx.Response(
                 422, json={"name": "UNPROCESSABLE_ENTITY", "details": [{"issue": "MAX_CAPTURE_AMOUNT_EXCEEDED"}]}
             )
         a["captured"] += cents
-        a["status"] = "PARTIALLY_CAPTURED"
+        a["status"] = "CAPTURED" if a["captured"] == _c(a["amount"]["value"]) else "PARTIALLY_CAPTURED"
         cap = {
             "id": _id("CAP"),
-            "status": "COMPLETED",
+            "status": "PENDING" if pending else "COMPLETED",
             "amount": {"currency_code": "USD", "value": _v(cents)},
             "custom_id": body.get("custom_id"),
             "invoice_id": body.get("invoice_id"),
@@ -180,7 +195,7 @@ class FakePayPal:
             )
         ref = {
             "id": _id("REF"),
-            "status": "COMPLETED",
+            "status": self.refund_status,
             "amount": {"currency_code": "USD", "value": _v(cents)},
             "custom_id": body.get("custom_id"),
             "_cap": cid,
@@ -199,7 +214,18 @@ class FakePayPal:
                 json={
                     "name": "USER_BUSINESS_ERROR",
                     "message": "User business error.",
-                    "details": [{"issue": "Batch with given sender_batch_id already exists"}],
+                    "details": [
+                        {
+                            "issue": "Batch with given sender_batch_id already exists",
+                            "link": [
+                                {
+                                    "href": "https://api.sandbox.paypal.com/v1/payments/payouts/"
+                                    + next(k for k, b in self.payouts.items() if b["sender_batch_id"] == sbid),
+                                    "rel": "self",
+                                }
+                            ],
+                        }
+                    ],
                 },
             )
         f = self._take("payout")

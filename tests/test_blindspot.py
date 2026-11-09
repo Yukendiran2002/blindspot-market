@@ -124,7 +124,7 @@ def test_lost_capture_response_is_found_by_custom_id(tmp_path):
     app = env.restart()
     run(app.settle.reconcile(jid))
     s = app.db.one("SELECT * FROM settlements WHERE id=?", res["settlement_id"])
-    assert s["capture_state"] == "DONE" and s["payout_state"] == "SUBMITTED"
+    assert s["capture_state"] == "DONE" and s["payout_state"] == "DONE"  # submitted, then every item SUCCESS
     assert len(env.fake.captures) == 1 and env.fake.captured_total() == 1000
 
 
@@ -148,8 +148,10 @@ def test_lost_payout_response_never_pays_twice(tmp_path):
     assert res["payout"] == "UNCERTAIN" and len(env.fake.payouts) == 1
     app = env.restart()
     run(app.settle.reconcile(jid))
-    s = app.db.one("SELECT payout_state FROM settlements WHERE id=?", res["settlement_id"])
-    assert s["payout_state"] == "SUBMITTED" and len(env.fake.payouts) == 1
+    s = app.db.one("SELECT payout_state, payout_batch_id FROM settlements WHERE id=?", res["settlement_id"])
+    # the duplicate check refused a second batch and pointed at the original, which is then tracked to SUCCESS
+    assert s["payout_state"] == "DONE" and len(env.fake.payouts) == 1
+    assert s["payout_batch_id"] == next(iter(env.fake.payouts))
 
 
 def test_payout_server_error_is_retried_safely(tmp_path):
@@ -291,3 +293,177 @@ def test_settlement_refuses_to_charge_beyond_the_hold(tmp_path):
     with pytest.raises(RuntimeError, match="exceeds hold"):
         run(env.app.settle_round(plan["round_id"]))
     assert not env.fake.captures
+
+
+# --- settlement state machine (review findings) --------------------------------------------------
+
+
+def test_pending_capture_pays_nobody_trains_nothing_and_blocks_buying(tmp_path):
+    env = Env(tmp_path)
+    anns = env.annotators(GOOD)
+    jid = env.job()
+    env.fake.fault("capture", "pending")
+    plan = run(env.app.plan_round(jid, anns))
+    env.app.simulate_answers(plan["round_id"])
+    res = run(env.app.settle_round(plan["round_id"]))
+    assert res["pending"] and res["capture"] == "PENDING" and not env.fake.payouts
+    active = env.app.db.one("SELECT COUNT(*) n FROM labels WHERE job_id=? AND source='bought' AND active=1", jid)["n"]
+    assert active == 0
+    assert env.app.db.one("SELECT status FROM rounds WHERE id=?", plan["round_id"])["status"] == "SETTLING"
+    with pytest.raises(RuntimeError):
+        run(env.app.plan_round(jid, anns))
+    assert run(env.app.close_job(jid))["status"] != "CLOSED"  # cannot close over an unconfirmed charge
+    for c in env.fake.captures.values():
+        c["status"] = "COMPLETED"  # PayPal completes the capture later
+    app = env.restart()
+    run(app.resume())
+    s = app.db.one("SELECT * FROM settlements WHERE id=?", res["settlement_id"])
+    assert s["capture_state"] == "DONE" and s["payout_state"] in ("SUBMITTED", "DONE")
+    assert app.db.one("SELECT status FROM rounds WHERE id=?", plan["round_id"])["status"] == "SETTLED"
+    active = app.db.one("SELECT COUNT(*) n FROM labels WHERE job_id=? AND source='bought' AND active=1", jid)["n"]
+    assert active == 20
+
+
+def test_declined_pending_capture_releases_the_reservation(tmp_path):
+    env = Env(tmp_path)
+    anns = env.annotators(GOOD)
+    jid = env.job()
+    env.fake.fault("capture", "pending")
+    plan = run(env.app.plan_round(jid, anns))
+    env.app.simulate_answers(plan["round_id"])
+    run(env.app.settle_round(plan["round_id"]))
+    assert env.app._job(jid)["captured_cents"] == 1000
+    for c in env.fake.captures.values():
+        c["status"] = "DECLINED"
+    run(env.app.resume())
+    job = env.app._job(jid)
+    assert job["captured_cents"] == 0 and job["status"] == "PAYMENT_PROBLEM" and not env.fake.payouts
+
+
+def test_crash_after_sending_looks_up_before_resending(tmp_path):
+    """Process died after the capture request left: the restart must find it, not send a second one."""
+    env = Env(tmp_path)
+    anns = env.annotators(GOOD)
+    jid = env.job()
+    plan = run(env.app.plan_round(jid, anns))
+    env.app.simulate_answers(plan["round_id"])
+    sid = env.app.settle.prepare_round(env.app._job(jid), plan["round_id"])
+    aid = env.app._job(jid)["authorization_id"]
+    run(env.app.paypal.capture_authorization(aid, amount="10.00", request_id="other-id", custom_id=sid, invoice_id=sid))
+    with env.app.db.tx() as conn:  # the request had been counted as sent before the crash
+        conn.execute("UPDATE settlements SET capture_tries=1 WHERE id=?", (sid,))
+    run(env.restart().resume())
+    assert len(env.fake.captures) == 1
+    assert env.app.db.one("SELECT capture_state FROM settlements WHERE id=?", sid)["capture_state"] == "DONE"
+
+
+def test_unreadable_order_never_triggers_a_resend(tmp_path):
+    env = Env(tmp_path)
+    anns = env.annotators(GOOD)
+    jid = env.job()
+    env.fake.fault("capture", "lose_response")
+    plan = run(env.app.plan_round(jid, anns))
+    env.app.simulate_answers(plan["round_id"])
+    run(env.app.settle_round(plan["round_id"]))
+    env.fake.idem.clear()
+    env.fake.fault("order", "500")
+    run(env.app.settle.reconcile(jid))
+    assert len(env.fake.captures) == 1
+    s = env.app.db.one("SELECT capture_state FROM settlements WHERE round_id=?", plan["round_id"])
+    assert s["capture_state"] == "UNCERTAIN"
+
+
+def test_too_few_answered_test_questions_is_not_accepted(tmp_path):
+    env = Env(tmp_path)
+    anns = env.annotators(GOOD)
+    jid = env.job()
+    plan = run(env.app.plan_round(jid, anns))
+    for t in env.app.db.all("SELECT id, pool_index FROM tasks WHERE round_id=? AND kind='learn'", plan["round_id"]):
+        env.app.answer(t["id"], anns[0], int(env.c.labels[t["pool_index"]]))
+    env.app.expire_open_tasks(plan["round_id"])  # the test questions were never answered
+    res = run(env.app.settle_round(plan["round_id"]))
+    assert res["accepted"] == 0 and not env.fake.captures and not env.fake.payouts
+
+
+def test_pending_refund_is_not_counted_until_completed(tmp_path):
+    env = Env(tmp_path)
+    anns = env.annotators(GOOD, SLEEPER)
+    jid = env.job(budget="60.00")
+    one_round(env, jid, anns, seed=1)
+    env.fake.refund_status = "PENDING"
+    one_round(env, jid, anns, seed=2)
+    assert env.app._job(jid)["refunded_cents"] == 0
+    for r in env.fake.refunds.values():
+        r["status"] = "COMPLETED"
+    run(env.app.settle.reconcile(jid))
+    assert env.app._job(jid)["refunded_cents"] == 500
+
+
+def test_failed_payout_item_is_reported_as_failed(tmp_path):
+    env = Env(tmp_path)
+    anns = env.annotators(GOOD, ("Bo", "bo@x.test", 1.0, None))
+    jid = env.job()
+    _, res = one_round(env, jid, anns)
+    env.fake.item_status["bo@x.test"] = "RETURNED"
+    run(env.app.settle.reconcile(jid))
+    s = env.app.db.one("SELECT payout_state FROM settlements WHERE id=?", res["settlement_id"])
+    assert s["payout_state"] == "ITEM_FAILED"
+
+
+def test_round_left_settling_after_a_crash_is_finished_on_restart(tmp_path):
+    env = Env(tmp_path)
+    anns = env.annotators(GOOD)
+    jid = env.job()
+    plan = run(env.app.plan_round(jid, anns))
+    env.app.simulate_answers(plan["round_id"])
+    env.app.settle.prepare_round(env.app._job(jid), plan["round_id"])  # crash right after the audit
+    app = env.restart()
+    assert run(app.resume()) == [plan["round_id"]]
+    assert app.db.one("SELECT status FROM rounds WHERE id=?", plan["round_id"])["status"] == "SETTLED"
+    assert len(env.fake.captures) == 1 and len(env.fake.payouts) == 1
+
+
+def test_refused_void_is_not_reported_as_released(tmp_path):
+    env = Env(tmp_path)
+    anns = env.annotators(GOOD)
+    jid = env.job()
+    one_round(env, jid, anns)
+    aid = env.app._job(jid)["authorization_id"]
+    env.fake.fault("void", "422")
+    out = run(env.app.close_job(jid))
+    assert out["status"] != "CLOSED" and env.fake.auths[aid]["status"] != "VOIDED"
+    assert not env.app.db.one("SELECT 1 FROM events WHERE job_id=? AND kind='budget_released'", jid)
+
+
+def test_a_job_cannot_be_funded_twice(tmp_path):
+    env = Env(tmp_path)
+    jid = env.job()
+    with pytest.raises(RuntimeError):
+        run(env.app.fund_with_card(jid))
+    assert len(env.fake.orders) == 1
+
+
+def test_refused_void_on_an_unused_hold_is_not_reported_as_released(tmp_path):
+    env = Env(tmp_path)
+    jid = env.job()
+    env.fake.fault("void", "422")
+    out = run(env.app.close_job(jid))
+    assert out["status"] != "CLOSED" and "nothing was released" in out["note"]
+
+
+def test_annotator_with_one_test_answer_is_not_accepted_even_if_trust_bar_were_lower(tmp_path, monkeypatch):
+    import blindspot.settlement as st
+
+    monkeypatch.setattr(st, "TRUST_MIN", 0.5)  # one correct answer would pass the bar: evidence must still be enough
+    env = Env(tmp_path)
+    anns = env.annotators(GOOD)
+    jid = env.job()
+    plan = run(env.app.plan_round(jid, anns))
+    for t in env.app.db.all("SELECT * FROM tasks WHERE round_id=?", plan["round_id"]):
+        if t["kind"] == "learn":
+            env.app.answer(t["id"], anns[0], int(env.c.labels[t["pool_index"]]))
+    gold = env.app.db.one("SELECT * FROM tasks WHERE round_id=? AND kind='gold' LIMIT 1", plan["round_id"])
+    env.app.answer(gold["id"], anns[0], gold["gold_label"])
+    env.app.expire_open_tasks(plan["round_id"])
+    res = run(env.app.settle_round(plan["round_id"]))
+    assert res["accepted"] == 0 and not env.fake.captures

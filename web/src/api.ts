@@ -148,8 +148,33 @@ export const console_ = {
   annotators: () => call<Me[]>('GET', '/api/annotators', undefined, op()),
   addSimulated: (body: { name: string; paypal_email: string; accuracy: number; late_accuracy?: number | null }) =>
     call<{ annotator_id: string }>('POST', '/api/annotators/simulated', body, op()),
-  events: (id: string, after: number) =>
-    new EventSource(`/api/jobs/${id}/events?after=${after}&key=${encodeURIComponent(operatorKey.get())}`),
+  /** Server-sent events read with fetch, so the operator key travels in a header, never in the URL. */
+  events: (id: string, after: number, onData: (data: string) => void) => {
+    const ctl = new AbortController()
+    ;(async () => {
+      try {
+        const r = await fetch(`/api/jobs/${id}/events?after=${after}`, { headers: op(), signal: ctl.signal })
+        const reader = r.body!.getReader()
+        const dec = new TextDecoder()
+        let buf = ''
+        for (;;) {
+          const { value, done } = await reader.read()
+          if (done) break
+          buf += dec.decode(value, { stream: true })
+          let i
+          while ((i = buf.indexOf('\n\n')) >= 0) {
+            const block = buf.slice(0, i)
+            buf = buf.slice(i + 2)
+            const data = block.split('\n').filter((l) => l.startsWith('data: ')).map((l) => l.slice(6)).join('\n')
+            if (data) onData(data)
+          }
+        }
+      } catch {
+        /* aborted or disconnected: the 4 s refresh keeps the page current */
+      }
+    })()
+    return () => ctl.abort()
+  },
 }
 
 export const pub = {

@@ -31,6 +31,7 @@ OPTIONS = 5  # model suggestions shown to an annotator (they can also search all
 # PayPal's honour period: captures are most likely to succeed in the first 3 days of an authorization
 # (https://developer.paypal.com/payment-methods/auth-honor/). A job buys labels only inside this window.
 HOLD_WINDOW_S = 3 * 24 * 3600
+PURCHASE_WINDOW_S = 48 * 3600  # buy only in the first 48 h, leaving a day to settle inside the honour period
 SANDBOX_CARD = {
     "number": "4111111111111111",
     "expiry": "2030-12",
@@ -199,8 +200,10 @@ class Blindspot:
         return jid
 
     async def fund_with_card(self, job_id: str) -> dict[str, Any]:
-        """Sandbox test card: PayPal authorizes the hold immediately."""
+        """Sandbox test card: PayPal authorizes the hold immediately. One funding attempt per job."""
         job = self._job(job_id)
+        if job["status"] != "DRAFT" or job["paypal_order_id"]:
+            raise RuntimeError("this job already has a PayPal order; it cannot be funded twice")
         rid = f"fund{job_id}"
         order = await self.paypal.create_budget_order(
             fmt(job["budget_cents"]),
@@ -213,6 +216,10 @@ class Blindspot:
 
     async def start_wallet_funding(self, job_id: str, return_url: str, cancel_url: str) -> dict[str, Any]:
         job = self._job(job_id)
+        if job["status"] == "FUNDING" and job["paypal_order_id"]:
+            return {"order_id": job["paypal_order_id"], "approve_url": None}  # resume the same attempt
+        if job["status"] != "DRAFT" or job["paypal_order_id"]:
+            raise RuntimeError("this job already has a PayPal order; it cannot be funded twice")
         order = await self.paypal.create_budget_order(
             fmt(job["budget_cents"]),
             job_id=job_id,
@@ -231,13 +238,16 @@ class Blindspot:
 
     async def finish_wallet_funding(self, job_id: str) -> dict[str, Any]:
         job = self._job(job_id)
+        if job["status"] != "FUNDING" or not job["paypal_order_id"]:
+            raise RuntimeError(f"job is {job['status']}, not waiting for a PayPal approval")
         order = await self.paypal.authorize_order(job["paypal_order_id"], request_id=f"auth{job_id}")
         return self._record_hold(job_id, order)
 
     def _record_hold(self, job_id: str, order: dict[str, Any]) -> dict[str, Any]:
         auths = authorizations_of(order)
-        if not auths or auths[0].get("status") not in ("CREATED", "PENDING"):
-            raise RuntimeError(f"PayPal did not create a budget hold (order status {order.get('status')})")
+        if not auths or auths[0].get("status") != "CREATED":
+            got = auths[0].get("status") if auths else order.get("status")
+            raise RuntimeError(f"PayPal has not placed a usable budget hold yet (status {got})")
         a = auths[0]
         job = self._job(job_id)
         if a["amount"]["value"] != fmt(job["budget_cents"]) or a["amount"]["currency_code"] != "USD":
@@ -246,7 +256,7 @@ class Blindspot:
             conn.execute(
                 "UPDATE jobs SET status='ACTIVE', paypal_order_id=?, authorization_id=?, hold_status=?, "
                 "funded_at=COALESCE(funded_at, ?), updated_at=? WHERE id=?",
-                (order["id"], a["id"], a["status"], self.clock(), self.clock(), job_id),
+                (order["id"], a["id"], a["status"], _ts(a.get("create_time")) or self.clock(), self.clock(), job_id),
             )
             self.db.event(
                 "budget_held",
@@ -266,8 +276,13 @@ class Blindspot:
             raise RuntimeError(f"job is {job['status']}")
         if self.db.one("SELECT 1 FROM rounds WHERE job_id=? AND status IN ('LABELLING','SETTLING')", job_id):
             raise RuntimeError("a round is already open")
-        if job["funded_at"] is not None and self.clock() - job["funded_at"] > HOLD_WINDOW_S:
-            detail = "The budget hold is past PayPal's 3-day honour period; no more labels are bought on it."
+        if self.settle.unresolved(job_id):
+            raise RuntimeError("a charge is still being confirmed with PayPal; no new purchase until it is")
+        if job["funded_at"] is not None and self.clock() - job["funded_at"] > PURCHASE_WINDOW_S:
+            detail = (
+                "The budget hold is older than 48 hours. Rounds must settle inside PayPal's 3-day honour period, "
+                "so no more labels are bought on it."
+            )
             self.db.event("agent_stopped", job_id, reason="hold_window", detail=detail, gain_per_10=None)
             return {"buy": False, "decision": {"buy": False, "n": 0, "reason": "hold_window", "detail": detail}}
         active = [a for a in annotator_ids if not self.db.one("SELECT banned FROM annotators WHERE id=?", a)["banned"]]
@@ -461,82 +476,127 @@ class Blindspot:
         return n
 
     async def settle_round(self, round_id: str) -> dict[str, Any]:
+        """Audit and settle a round whose tasks are all answered or expired. Safe to call again after a crash."""
         rnd = self.db.one("SELECT * FROM rounds WHERE id=?", round_id)
-        job = self._job(rnd["job_id"])
-        if rnd["status"] != "LABELLING":
+        if rnd["status"] == "LABELLING":
+            if self.db.one("SELECT 1 FROM tasks WHERE round_id=? AND status='OPEN'", round_id):
+                raise RuntimeError("tasks still open")
+            self.settle.prepare_round(self._job(rnd["job_id"]), round_id)
+        elif rnd["status"] != "SETTLING":
             raise RuntimeError(f"round is {rnd['status']}")
-        if self.db.one("SELECT 1 FROM tasks WHERE round_id=? AND status='OPEN'", round_id):
-            raise RuntimeError("tasks still open")
-        sid = self.settle.prepare_round(job, round_id)
+        return await self.finalize_round(round_id)
+
+    async def finalize_round(self, round_id: str) -> dict[str, Any]:
+        """Each step is idempotent: charge -> (only when COMPLETED) pay -> revocation check -> retrain -> SETTLED.
+        If PayPal has not confirmed the charge, the round stays SETTLING and reports pending."""
+        rnd = self.db.one("SELECT * FROM rounds WHERE id=?", round_id)
+        sid = self.db.one("SELECT id FROM settlements WHERE round_id=? AND kind='round'", round_id)["id"]
         await self.settle.charge(sid)
-        await self.settle.pay(sid)
-        # late evidence: anyone whose overall gold record fell below the bar loses earlier accepted labels
-        for a in self.db.all("SELECT DISTINCT annotator_id FROM tasks WHERE job_id=?", job["id"]):
-            correct, total = gold_record(self.db, job["id"], a["annotator_id"])
-            banned = self.db.one("SELECT banned FROM annotators WHERE id=?", a["annotator_id"])["banned"]
-            if not banned and total >= MIN_GOLD and trust(correct, total) < TRUST_MIN:
-                await self.settle.revoke_annotator(
-                    self._job(job["id"]), a["annotator_id"], f"gold accuracy {correct}/{total} below the trust bar"
-                )
-        m = self._model(job["id"], refit=True)
-        val, sealed = m.accuracy("validation"), m.accuracy("sealed")
-        job = self._job(job["id"])
-        with self.db.tx() as conn:
-            conn.execute(
-                "UPDATE rounds SET status='SETTLED', val_after=?, sealed_after=?, settled_at=? WHERE id=?",
-                (val, sealed, self.clock(), round_id),
-            )
-            n_labels = conn.execute(
-                "SELECT COUNT(*) n FROM labels WHERE job_id=? AND active=1", (job["id"],)
-            ).fetchone()["n"]
-            self.db.event(
-                "model_measured",
-                job["id"],
-                conn=conn,
-                round=rnd["number"],
-                labels=n_labels,
-                validation=val,
-                sealed=sealed,
-                spent=fmt(job["captured_cents"] - job["refunded_cents"]),
-                charged=fmt(job["captured_cents"]),
-            )
         s = self.db.one("SELECT * FROM settlements WHERE id=?", sid)
+        if s["capture_state"] not in ("DONE", "FAILED"):
+            return {**self._settlement_result(s), "pending": True}
+        if s["capture_state"] == "DONE":
+            await self.settle.pay(sid)
+            # late evidence: anyone whose overall test record fell below the bar loses earlier accepted labels
+            job = self._job(rnd["job_id"])
+            for a in self.db.all("SELECT DISTINCT annotator_id FROM tasks WHERE job_id=?", job["id"]):
+                correct, total = gold_record(self.db, job["id"], a["annotator_id"])
+                banned = self.db.one("SELECT banned FROM annotators WHERE id=?", a["annotator_id"])["banned"]
+                if not banned and total >= MIN_GOLD and trust(correct, total) < TRUST_MIN:
+                    await self.settle.revoke_annotator(
+                        self._job(job["id"]), a["annotator_id"], f"test accuracy {correct}/{total} below the trust bar"
+                    )
+        m = self._model(rnd["job_id"], refit=True)
+        val, sealed = m.accuracy("validation"), m.accuracy("sealed")
+        job = self._job(rnd["job_id"])
+        final = "SETTLED" if s["capture_state"] == "DONE" else "CHARGE_FAILED"
+        with self.db.tx() as conn:
+            cur = conn.execute(
+                "UPDATE rounds SET status=?, val_after=?, sealed_after=?, settled_at=? WHERE id=? AND status='SETTLING'",
+                (final, val, sealed, self.clock(), round_id),
+            )
+            if cur.rowcount:
+                n_labels = conn.execute(
+                    "SELECT COUNT(*) n FROM labels WHERE job_id=? AND active=1", (job["id"],)
+                ).fetchone()["n"]
+                self.db.event(
+                    "model_measured",
+                    job["id"],
+                    conn=conn,
+                    round=rnd["number"],
+                    labels=n_labels,
+                    validation=val,
+                    sealed=sealed,
+                    spent=fmt(job["captured_cents"] - job["refunded_cents"]),
+                    charged=fmt(job["captured_cents"]),
+                )
+        return {**self._settlement_result(self.db.one("SELECT * FROM settlements WHERE id=?", sid)), "pending": False,
+                "validation": val, "sealed": sealed}  # fmt: skip
+
+    def _settlement_result(self, s: Any) -> dict[str, Any]:
         return {
-            "settlement_id": sid,
+            "settlement_id": s["id"],
             "accepted": s["accepted"],
             "rejected": s["rejected"],
             "charged": fmt(s["charge_cents"]),
             "capture": s["capture_state"],
             "paid": fmt(s["payout_cents"]),
             "payout": s["payout_state"],
-            "validation": val,
-            "sealed": sealed,
         }
 
+    async def resume(self) -> list[str]:
+        """After a restart: finish money calls left open, then every round left SETTLING."""
+        await self.settle.reconcile()
+        done = []
+        for r in self.db.all("SELECT id FROM rounds WHERE status='SETTLING'"):
+            if self.db.one("SELECT 1 FROM settlements WHERE round_id=? AND kind='round'", r["id"]):
+                res = await self.finalize_round(r["id"])
+                if not res["pending"]:
+                    done.append(r["id"])
+        return done
+
     async def close_job(self, job_id: str) -> dict[str, Any]:
+        """Settle any open round (unanswered tasks expire unpaid), confirm every charge, then void the rest of the hold.
+        Release is reported only when PayPal shows the authorization VOIDED (or fully CAPTURED)."""
         job = self._job(job_id)
         if job["status"] == "CLOSED":
             return {"status": "CLOSED"}
+        for r in self.db.all("SELECT id FROM rounds WHERE job_id=? AND status='LABELLING'", job_id):
+            self.expire_open_tasks(r["id"])
+            await self.settle_round(r["id"])
         await self.settle.reconcile(job_id)
-        rid = job["void_request_id"] or new_id("void")
-        with self.db.tx() as conn:
-            conn.execute(
-                "UPDATE jobs SET status='CLOSING', void_request_id=?, updated_at=? WHERE id=?",
-                (rid, self.clock(), job_id),
-            )
-        left = job["budget_cents"] - job["captured_cents"]
+        for r in self.db.all("SELECT id FROM rounds WHERE job_id=? AND status='SETTLING'", job_id):
+            await self.finalize_round(r["id"])
+        if self.settle.unresolved(job_id):
+            return {"status": job["status"], "note": "a charge is still being confirmed with PayPal; close again later"}
+        job = self._job(job_id)  # totals after reconciliation
         if not job["authorization_id"]:
             state = "NEVER_FUNDED"
-        elif left <= 0:
-            state = "FULLY_USED"  # the whole hold was charged; nothing to release
         else:
+            rid = job["void_request_id"] or new_id("void")
+            with self.db.tx() as conn:
+                conn.execute(
+                    "UPDATE jobs SET status='CLOSING', void_request_id=?, updated_at=? WHERE id=?",
+                    (rid, self.clock(), job_id),
+                )
+            if job["budget_cents"] - job["captured_cents"] > 0:
+                try:
+                    await self.paypal.void_authorization(job["authorization_id"], request_id=rid)
+                except PayPalUncertain:
+                    return {"status": "CLOSING", "note": "void outcome unknown; close again to check"}
+                except PayPalDefinite:
+                    pass  # the authorization's own status below decides what happened
             try:
-                await self.paypal.void_authorization(job["authorization_id"], request_id=rid)
-                state = "VOIDED"
-            except PayPalDefinite as exc:
-                state = "ALREADY_CLOSED" if exc.status == 422 else f"VOID_REFUSED {exc.name}"
-            except PayPalUncertain:
-                return {"status": "CLOSING", "note": "void outcome unknown; retry close"}
+                auth = await self.paypal.get_authorization(job["authorization_id"])
+            except (PayPalUncertain, PayPalDefinite):
+                return {"status": "CLOSING", "note": "could not read the hold from PayPal; close again to check"}
+            state = auth.get("status") or "UNKNOWN"
+            if state not in ("VOIDED", "CAPTURED", "PARTIALLY_CAPTURED", "EXPIRED"):
+                self.db.event("void_refused", job_id, hold=state)
+                return {"status": "CLOSING", "note": f"PayPal shows the hold as {state}; nothing was released"}
+            if state == "PARTIALLY_CAPTURED":
+                return {"status": "CLOSING", "note": "PayPal still shows uncaptured budget on hold; close again"}
+        left = job["budget_cents"] - job["captured_cents"]
         with self.db.tx() as conn:
             conn.execute(
                 "UPDATE jobs SET status='CLOSED', hold_status=?, updated_at=? WHERE id=?", (state, self.clock(), job_id)
@@ -545,11 +605,11 @@ class Blindspot:
                 "budget_released",
                 job_id,
                 conn=conn,
-                released=fmt(left),
+                released=fmt(left if state in ("VOIDED", "EXPIRED") else 0),
                 hold=state,
                 spent=fmt(job["captured_cents"] - job["refunded_cents"]),
             )
-        return {"status": "CLOSED", "released": fmt(left), "hold": state}
+        return {"status": "CLOSED", "released": fmt(left if state in ("VOIDED", "EXPIRED") else 0), "hold": state}
 
     # --- views --------------------------------------------------------------------------------
     def summary(self, job_id: str) -> dict[str, Any]:
@@ -679,3 +739,15 @@ def _settlement_view(s: Any) -> dict[str, Any]:
         "payout_state": s["payout_state"],
         "error": s["error"],
     }
+
+
+def _ts(value: Any) -> float | None:
+    """PayPal RFC 3339 time -> epoch seconds."""
+    if not value:
+        return None
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()  # Python 3.11+ reads the Z suffix
+    except ValueError:
+        return None

@@ -230,13 +230,16 @@ function AgentControls({ d, onChange }: { d: JobDetail; onChange: () => void }) 
 
 function Money({ d }: { d: JobDetail }) {
   const j = d.job
-  const paid = d.settlements.reduce((a, s) => a + Math.round(Number(s.payout) * 100), 0)
+  const cents = (states: string[]) =>
+    d.settlements.filter((s) => s.kind === 'round' && states.includes(s.payout_state)).reduce((a, s) => a + Math.round(Number(s.payout) * 100), 0)
+  const sent = cents(['SUBMITTED', 'ITEMS_PENDING', 'ITEM_FAILED', 'DONE'])
+  const received = cents(['DONE'])
   const released = j.status === 'CLOSED' ? j.budget_cents - j.captured_cents : 0
   const cells: [string, string, string][] = [
     ['Held by PayPal', j.authorization_id ? usd(j.budget_cents) : '—', 'text-slate-100'],
     ['Charged', usd(j.captured_cents), 'text-emerald-300'],
     ['Refunded', usd(j.refunded_cents), 'text-amber-300'],
-    ['Paid to people', usd(paid), 'text-sky-300'],
+    [`Sent to people · ${usd(received)} received`, usd(sent), 'text-sky-300'],
     [j.status === 'CLOSED' ? 'Released' : 'Still held', usd(j.status === 'CLOSED' ? released : j.authorization_id ? j.budget_cents - j.captured_cents : 0), 'text-slate-300'],
   ]
   return (
@@ -284,11 +287,9 @@ function JobView({ id, clientId, experiment, onJobChange }: { id: string; client
   useEffect(() => {
     setLines([])
     refresh()
-    const es = console_.events(id, 0)
     const seen = new Set<number>()
-    es.onmessage = () => undefined
-    const handler = (ev: MessageEvent) => {
-      const e = JSON.parse(ev.data) as JobEvent
+    const handler = (data: string) => {
+      const e = JSON.parse(data) as JobEvent
       if (seen.has(e.seq)) return
       seen.add(e.seq)
       const line = describe(e)
@@ -296,15 +297,10 @@ function JobView({ id, clientId, experiment, onJobChange }: { id: string; client
       refresh()
       if (e.kind === 'budget_held' || e.kind === 'budget_released') onJobChange()
     }
-    const kinds = [
-      'job_created', 'budget_held', 'autopilot_started', 'round_planned', 'agent_stopped', 'tasks_expired', 'round_audited', 'charged', 'charge_uncertain', 'charge_refused',
-      'payout_submitted', 'payout_already_submitted', 'payout_uncertain', 'payout_refused', 'payout_checked', 'annotator_revoked', 'refunded', 'refund_refused', 'model_measured',
-      'budget_released', 'audit_completed', 'money_question', 'explanation_fallback', 'autopilot_finished', 'autopilot_stopped', 'autopilot_failed', 'annotator_joined',
-    ]
-    kinds.forEach((k) => es.addEventListener(k, handler as EventListener))
+    const stop = console_.events(id, 0, handler)
     const t = setInterval(refresh, 4000)
     return () => {
-      es.close()
+      stop()
       clearInterval(t)
     }
   }, [id, refresh, onJobChange])
@@ -356,6 +352,7 @@ function JobView({ id, clientId, experiment, onJobChange }: { id: string; client
   const bench: Series[] = experiment
     ? [
         { name: 'Blind-spot buying', color: '#3b82f6', points: experiment.points.map((p) => ({ x: p.dollars, y: p.blindspot, note: `${p.labels} labels` })) },
+        { name: 'Uncertainty only', color: '#f59e0b', dashed: true, points: experiment.points.map((p) => ({ x: p.dollars, y: p.uncertain, note: `${p.labels} labels` })) },
         { name: 'Random buying', color: '#94a3b8', dashed: true, points: experiment.points.map((p) => ({ x: p.dollars, y: p.random, note: `${p.labels} labels` })) },
       ]
     : []
@@ -406,7 +403,7 @@ function JobView({ id, clientId, experiment, onJobChange }: { id: string; client
           </div>
           <div className="card p-4">
             <div className="label">Benchmark · same budget, two buyers</div>
-            <div className="mt-1 text-xs text-mute">Sealed test set, mean of {experiment?.seeds.length ?? 5} runs. Blind-spot buying reaches the same accuracy for less.</div>
+            <div className="mt-1 text-xs text-mute">Sealed test set, mean of {experiment?.seeds.length ?? 5} runs. Both targeted buyers beat random buying; blind spots add a little over plain uncertainty.</div>
             <LineChart series={bench} xLabel="Dollars spent on labels" yLabel="Accuracy" xFormat={(x) => `$${x.toFixed(0)}`} height={240} />
           </div>
         </div>

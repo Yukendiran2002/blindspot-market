@@ -60,7 +60,7 @@ def _payments(order: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     return out
 
 
-async def audit_job(db: Database, reader: ToolkitReader, job_id: str) -> dict[str, Any]:
+async def audit_job(db: Database, reader: Any, job_id: str, paypal: Any = None) -> dict[str, Any]:
     """Compare Blindspot's ledger for one job with the order as PayPal reports it. Records an ``audit_completed`` event."""
     job = db.one("SELECT * FROM jobs WHERE id=?", job_id)
     if job is None:
@@ -112,11 +112,36 @@ async def audit_job(db: Database, reader: ToolkitReader, job_id: str) -> dict[st
             f"released {fmt(job['budget_cents'] - job['captured_cents'])}",
             "missing" if auth is None else str(auth.get("status")),
         )
+    if paypal is not None:  # the toolkit has no payouts tool: read each annotator payout with the Payouts API
+        for s in db.all(
+            "SELECT * FROM settlements WHERE job_id=? AND kind='round' AND payout_batch_id IS NOT NULL", job_id
+        ):
+            expected = {i["sender_item_id"]: i["amount"]["value"] for i in json.loads(s["payout_items"])}
+            try:
+                res = await paypal.get_payout(s["payout_batch_id"])
+            except Exception:  # noqa: BLE001 - reported as a failed check
+                check(f"Payout batch {s['payout_batch_id']}", False, "sent", "could not read")
+                continue
+            got = {
+                i.get("payout_item", {}).get("sender_item_id"): (
+                    i.get("payout_item", {}).get("amount", {}).get("value"),
+                    i.get("transaction_status"),
+                )
+                for i in res.get("items", [])
+            }
+            amounts_ok = all(got.get(k, (None,))[0] == v for k, v in expected.items())
+            statuses = sorted({st for _, st in got.values()})
+            check(
+                f"Payout batch {s['payout_batch_id']} (Payouts API)",
+                amounts_ok and len(got) == len(expected),
+                f"{len(expected)} people, {fmt(s['payout_cents'])}",
+                f"{len(got)} items, {', '.join(statuses) or 'none'}",
+            )
     result = {
         "ok": all(c["ok"] for c in checks),
         "order_id": job["paypal_order_id"],
         "checks": checks,
-        "source": "PayPal Agent Toolkit get_order_details",
+        "source": "PayPal Agent Toolkit get_order_details; Payouts API for annotator payouts",
     }
     db.event("audit_completed", job_id, ok=result["ok"], checks=checks, source=result["source"])
     return result

@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS settlements (
     rejected         INTEGER NOT NULL DEFAULT 0,
     charge_cents     INTEGER NOT NULL DEFAULT 0,
     capture_id       TEXT,
-    capture_state    TEXT NOT NULL DEFAULT 'NONE', -- NONE, SENDING, DONE, UNCERTAIN, FAILED
+    capture_state    TEXT NOT NULL DEFAULT 'NONE', -- NONE, SENDING, PENDING, DONE, UNCERTAIN, REVIEW, FAILED
     refund_cents     INTEGER NOT NULL DEFAULT 0,
     refund_capture_id TEXT,
     refund_id        TEXT,
@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS settlements (
     payout_cents     INTEGER NOT NULL DEFAULT 0,
     payout_items     TEXT NOT NULL DEFAULT '[]',
     payout_batch_id  TEXT,
-    payout_state     TEXT NOT NULL DEFAULT 'NONE', -- NONE, SENDING, SUBMITTED, ITEMS_PENDING, DONE, UNCERTAIN, FAILED
+    payout_state     TEXT NOT NULL DEFAULT 'NONE', -- NONE, SENDING, SUBMITTED, ITEMS_PENDING, ITEM_FAILED, DONE, UNCERTAIN, REVIEW, FAILED
     error            TEXT,
     created_at       REAL NOT NULL,
     updated_at       REAL NOT NULL
@@ -126,7 +126,11 @@ class Database:
 
     def _migrate(self) -> None:
         """Add columns introduced after the first live runs (SQLite has no ADD COLUMN IF NOT EXISTS)."""
-        for table, column, decl in (("jobs", "funded_at", "REAL"), ("annotators", "token_hash", "TEXT")):
+        for table, column, decl in (
+            ("jobs", "funded_at", "REAL"),
+            ("annotators", "token_hash", "TEXT"),
+            ("settlements", "capture_tries", "INTEGER NOT NULL DEFAULT 0"),
+        ):
             cols = {r["name"] for r in self._conn().execute(f"PRAGMA table_info({table})")}
             if column not in cols:
                 self._conn().execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
