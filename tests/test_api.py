@@ -169,3 +169,51 @@ def test_autopilot_needs_a_funded_job(client):
     jid = r.json()["job_id"]
     assert client.post(f"/api/jobs/{jid}/autopilot", json={}, headers=KEY).status_code == 409
     assert client.get("/api/jobs/nope", headers=KEY).status_code == 404
+
+
+def _kinds(env, jid):
+    return [(e["kind"], e.get("data", {})) for e in env.app.events(jid)]
+
+
+def test_an_autopilot_cut_by_a_restart_resumes_on_startup(env):
+    env.annotators(("Ana", "ana@x.test", 1.0, None))
+    with TestClient(create_app(env.app, operator_key="op-secret", invite_code="join-me")) as c:
+        join(c)  # a person holds open tasks, so the run is still waiting when the server goes down
+        jid = new_job(c)
+        assert (
+            c.post(f"/api/jobs/{jid}/autopilot", json={"rounds": 2, "wait_seconds": 2}, headers=KEY).status_code == 200
+        )
+        end = time.time() + 30
+        while "round_planned" not in [k for k, _ in _kinds(env, jid)] and time.time() < end:
+            time.sleep(0.1)
+    kinds = [k for k, _ in _kinds(env, jid)]
+    assert kinds[-1] == "autopilot_stopped"
+    env.restart()
+    with TestClient(create_app(env.app, operator_key="op-secret", invite_code="join-me")) as c:
+        j = wait_for(c, jid, lambda j: j["job"]["status"] == "CLOSED" and not j["autopilot"])
+    kinds = [k for k, _ in _kinds(env, jid)]
+    assert "autopilot_resumed" in kinds and kinds.count("autopilot_finished") == 1
+    assert all(r["status"] == "SETTLED" for r in j["rounds"])
+
+
+def test_an_operator_stop_is_not_resumed_after_a_restart(env):
+    env.annotators(("Ana", "ana@x.test", 1.0, None))
+    with TestClient(create_app(env.app, operator_key="op-secret", invite_code="join-me")) as c:
+        join(c)
+        jid = new_job(c)
+        c.post(f"/api/jobs/{jid}/autopilot", json={"rounds": 2, "wait_seconds": 30}, headers=KEY)
+        assert c.delete(f"/api/jobs/{jid}/autopilot", headers=KEY).status_code == 200
+    env.restart()
+    with TestClient(create_app(env.app, operator_key="op-secret", invite_code="join-me")) as c:
+        time.sleep(0.5)
+        assert not c.get(f"/api/jobs/{jid}", headers=KEY).json()["autopilot"]
+    assert "autopilot_resumed" not in [k for k, _ in _kinds(env, jid)]
+
+
+def test_the_gemini_daily_limit_survives_a_restart(env):
+    env.app.gemini_key, env.app.gemini_daily_limit = "k", 2
+    assert env.app.gemini_allowed() and env.app.gemini_allowed()
+    assert not env.app.gemini_allowed()
+    app = env.restart()
+    app.gemini_key, app.gemini_daily_limit = "k", 2
+    assert not app.gemini_allowed()

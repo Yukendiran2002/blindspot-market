@@ -79,6 +79,7 @@ class Autopilot:
     def __init__(self, app: Blindspot, locks: dict[str, asyncio.Lock]) -> None:
         self.app, self.locks = app, locks
         self.tasks: dict[str, asyncio.Task[None]] = {}
+        self.stop_reason: dict[str, str] = {}
 
     def running(self, job_id: str) -> bool:
         t = self.tasks.get(job_id)
@@ -89,7 +90,8 @@ class Autopilot:
             raise RuntimeError("autopilot already running for this job")
         self.tasks[job_id] = asyncio.create_task(self._run(job_id, opts), name=f"autopilot-{job_id}")
 
-    async def stop(self, job_id: str) -> None:
+    async def stop(self, job_id: str, reason: str = "stopped by operator") -> None:
+        self.stop_reason[job_id] = reason
         t = self.tasks.get(job_id)
         if t and not t.done():
             t.cancel()
@@ -100,7 +102,7 @@ class Autopilot:
 
     async def _run(self, job_id: str, opts: AutopilotIn) -> None:
         app = self.app
-        app.db.event("autopilot_started", job_id, rounds=opts.rounds, wait_seconds=opts.wait_seconds)
+        app.db.event("autopilot_started", job_id, **opts.model_dump())
         try:
             for _ in range(opts.rounds):
                 async with self.locks.setdefault(job_id, asyncio.Lock()):
@@ -145,7 +147,7 @@ class Autopilot:
                     await app.close_job(job_id)
             app.db.event("autopilot_finished", job_id)
         except asyncio.CancelledError:
-            app.db.event("autopilot_stopped", job_id, reason="stopped by operator")
+            app.db.event("autopilot_stopped", job_id, reason=self.stop_reason.pop(job_id, "stopped by operator"))
             raise
         except Exception as exc:  # noqa: BLE001 - recorded for the operator; money state is in settlements
             app.db.event("autopilot_failed", job_id, error=f"{type(exc).__name__}: {exc}"[:300])
@@ -168,9 +170,28 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await service.resume()  # finish money calls and rounds a previous process left open
+        # restart agent runs that a previous process was in the middle of (deploy or restart, not an operator stop)
+        for r in service.db.all(
+            "SELECT e.job_id, e.kind, e.data FROM events e JOIN (SELECT job_id, MAX(seq) seq FROM events "
+            "WHERE kind LIKE 'autopilot_%' GROUP BY job_id) last ON last.seq = e.seq"
+        ):
+            data = json.loads(r["data"])
+            interrupted = r["kind"] in ("autopilot_started", "autopilot_resumed") or (
+                r["kind"] == "autopilot_stopped" and data.get("reason") == "server restart"
+            )
+            if interrupted and service._job(r["job_id"])["status"] == "ACTIVE":
+                started = service.db.one(
+                    "SELECT data FROM events WHERE job_id=? AND kind='autopilot_started' ORDER BY seq DESC LIMIT 1",
+                    r["job_id"],
+                )
+                opts = AutopilotIn(
+                    **{k: v for k, v in json.loads(started["data"]).items() if k in AutopilotIn.model_fields}
+                )
+                service.db.event("autopilot_resumed", r["job_id"], reason="server restarted")
+                pilot.start(r["job_id"], opts)
         yield
         for job_id in list(pilot.tasks):
-            await pilot.stop(job_id)
+            await pilot.stop(job_id, reason="server restart")
 
     api = FastAPI(title="Blindspot Market", version="0.1.0", lifespan=lifespan)
 

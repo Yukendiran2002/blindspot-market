@@ -11,6 +11,7 @@ Simulated annotators are labelled as simulated everywhere; their answers come fr
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import secrets
@@ -55,16 +56,22 @@ class Blindspot:
         self.settle = Settlement(db, paypal, clock)
         self.gemini_key = gemini_key
         self.gemini_daily_limit = 300  # model calls per UTC day; past it, template explanations and no tips
-        self._gemini_day, self._gemini_used = "", 0
         self._models: dict[str, Model] = {}
 
     def gemini_allowed(self) -> bool:
-        day = time.strftime("%Y-%m-%d", time.gmtime())
-        if day != self._gemini_day:
-            self._gemini_day, self._gemini_used = day, 0
-        if not self.gemini_key or self._gemini_used >= self.gemini_daily_limit:
+        """Daily model-call budget, counted in the database so a restart does not reset it (UTC day)."""
+        if not self.gemini_key:
             return False
-        self._gemini_used += 1
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        with self.db.tx() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS ai_usage (day TEXT PRIMARY KEY, calls INTEGER NOT NULL)")
+            row = conn.execute("SELECT calls FROM ai_usage WHERE day=?", (day,)).fetchone()
+            used = row["calls"] if row else 0
+            if used >= self.gemini_daily_limit:
+                return False
+            conn.execute(
+                "INSERT INTO ai_usage(day, calls) VALUES (?, 1) ON CONFLICT(day) DO UPDATE SET calls=calls+1", (day,)
+            )
         return True
 
     # --- annotators ---------------------------------------------------------------------------
@@ -299,8 +306,8 @@ class Blindspot:
         active = [a for a in annotator_ids if not self.db.one("SELECT banned FROM annotators WHERE id=?", a)["banned"]]
         if not active:
             raise RuntimeError("no annotators available")
-        m = self._model(job_id)
-        val = m.accuracy("validation")
+        m = await asyncio.to_thread(self._model, job_id)
+        val = await asyncio.to_thread(m.accuracy, "validation")
         history = self._history(job_id)
         labelled = {r["pool_index"] for r in self.db.all("SELECT pool_index FROM labels WHERE job_id=?", job_id)}
         pending = {
@@ -336,7 +343,7 @@ class Blindspot:
             ]
             confusions: list[dict[str, Any]] = []
         else:
-            d.picks = m.blind_spots(available, d.n, seed=number)
+            d.picks = await asyncio.to_thread(m.blind_spots, available, d.n, number)
             confusions = agent_mod.summarize_picks(d.picks, self.c.intents)
         d.explanation = agent_mod.template_explanation(d, confusions)
         if self.gemini_allowed():
@@ -352,7 +359,8 @@ class Blindspot:
                 guide = []
         rid = new_id("rnd")
         now = self.clock()
-        preds = m.predict(np.array([p["pool_index"] for p in d.picks]), top=OPTIONS)
+        sealed_before = await asyncio.to_thread(m.accuracy, "sealed")
+        preds = await asyncio.to_thread(m.predict, np.array([p["pool_index"] for p in d.picks]), OPTIONS)
         seeds = [
             r["pool_index"]
             for r in self.db.all("SELECT pool_index FROM labels WHERE job_id=? AND source='seed'", job_id)
@@ -369,7 +377,7 @@ class Blindspot:
                     "LABELLING",
                     json.dumps({**json.loads(d.to_json()), "confusions": confusions, "guide": guide}),
                     val,
-                    m.accuracy("sealed"),
+                    sealed_before,
                     now,
                 ),
             )
@@ -517,8 +525,8 @@ class Blindspot:
                     await self.settle.revoke_annotator(
                         self._job(job["id"]), a["annotator_id"], f"test accuracy {correct}/{total} below the trust bar"
                     )
-        m = self._model(rnd["job_id"], refit=True)
-        val, sealed = m.accuracy("validation"), m.accuracy("sealed")
+        m = await asyncio.to_thread(self._model, rnd["job_id"], True)
+        val, sealed = await asyncio.to_thread(lambda: (m.accuracy("validation"), m.accuracy("sealed")))
         job = self._job(rnd["job_id"])
         final = "SETTLED" if s["capture_state"] == "DONE" else "CHARGE_FAILED"
         with self.db.tx() as conn:
