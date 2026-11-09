@@ -1,0 +1,9 @@
+*.db
+*.key
+.env
+.venv/
+__pycache__/
+data/
+experiment/.venv/
+web/dist/
+web/node_modules/

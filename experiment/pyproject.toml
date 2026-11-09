@@ -1,0 +1,13 @@
+[project]
+name = "blindspot-experiment"
+version = "0.0.1"
+requires-python = ">=3.12,<3.14"
+dependencies = ["datasets>=3", "sentence-transformers>=3", "scikit-learn>=1.5", "torch>=2.4", "numpy"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

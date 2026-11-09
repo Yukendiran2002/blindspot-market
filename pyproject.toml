@@ -1,0 +1,61 @@
+[project]
+name = "blindspot"
+version = "0.1.0"
+description = "Blindspot Market: an AI that pays people to teach it what it gets wrong (PayPal sandbox)"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = "Apache-2.0"
+dependencies = [
+    "httpx>=0.27,<1",
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "numpy>=1.26",
+    "scikit-learn>=1.5",
+    "sentence-transformers>=3",
+    "datasets>=3",
+    "torch>=2.4",
+    "nexura-agents==0.9.3",
+    "paypal-agent-toolkit==1.11.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.8", "mypy>=1.13"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/blindspot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.uv]
+# Blindspot uses only the toolkit's framework-neutral core (paypal_agent_toolkit.shared: pydantic + requests).
+# Its OpenAI Agents / LangChain / CrewAI adapters are not used, so their pinned frameworks are left out.
+override-dependencies = [
+    "openai-agents; sys_platform == 'never'",
+    "langchain; sys_platform == 'never'",
+    "crewai-tools; sys_platform == 'never'",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.mypy]
+python_version = "3.12"
+
+[[tool.mypy.overrides]]
+module = ["sklearn.*", "datasets.*", "paypal_agent_toolkit.*", "sentence_transformers.*"]
+ignore_missing_imports = true
